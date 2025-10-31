@@ -55,6 +55,19 @@
         </div>
         <pre id="agglog">(nothing yet)</pre>
       </div>
+      <div class="panel">
+        <h3>Artist Playlists</h3>
+        <p class="small">
+          Assumes each artist playlist is named exactly as the artist (case-insensitive).
+          Uses the <b>primary artist</b> on each track.
+        </p>
+        <div class="toolbar" style="padding-left:0">
+          <button id="syncArtistPlaylists">Sync artist playlists (needs ≥5 in “All My Songs”)</button>
+          <button id="findMissingArtistPlaylists">Find artists (≥7) without a playlist</button>
+        </div>
+        <pre id="artistlog">(nothing yet)</pre>
+      </div>
+
     </div>
 
     <p class="small">Tip: This is a client-side app. All data persists in your browser storage only (no server). Clear it by removing site data for this origin.</p>
@@ -421,6 +434,153 @@
       try { await requireTokenInteractive(); await updateAggregateNow({ removeExtras:true }); }
       catch (e) { aggEl.textContent = "Error: " + e.message; }
     };
+
+    document.getElementById("syncArtistPlaylists").onclick = async () => {
+  try { await requireTokenInteractive(); await syncArtistPlaylists(5); }
+  catch (e) { document.getElementById("artistlog").textContent = "Error: " + e.message; }
+};
+
+document.getElementById("findMissingArtistPlaylists").onclick = async () => {
+  try { await requireTokenInteractive(); await findMissingArtistPlaylists(7); }
+  catch (e) { document.getElementById("artistlog").textContent = "Error: " + e.message; }
+};
+
+
+    /* ===== Artist Playlist Tools ===== */
+
+// Normalize artist names for stable matching
+function normalizeArtistName(name) {
+  return (name || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")   // strip accents
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Get full track details from a playlist (id, uri, name, artists[])
+async function getPlaylistTracksDetailed(playlistId) {
+  const tracks = [];
+  let next = { limit: 100, offset: 0 };
+  while (true) {
+    const page = await api(`/playlists/${playlistId}/tracks`, { params: next });
+    for (const it of page.items) {
+      const tr = it.track;
+      if (!tr || it.is_local) continue;
+      if (tr.type !== "track") continue;
+      tracks.push({
+        id: tr.id,
+        uri: tr.uri,
+        name: tr.name,
+        artists: (tr.artists || []).map(a => a.name)
+      });
+    }
+    if (!page.next) break;
+    next.offset += next.limit;
+  }
+  return tracks;
+}
+
+// Build index: primary artist -> list of track URIs (from All My Songs)
+async function buildArtistIndexFromAggregate() {
+  const agg = await ensureAggregatePlaylist();
+  const tracks = await getPlaylistTracksDetailed(agg.id);
+  const byArtist = new Map(); // normArtist -> { displayName, uris[] }
+  for (const t of tracks) {
+    const primary = t.artists?.[0];
+    if (!primary) continue;
+    const key = normalizeArtistName(primary);
+    if (!byArtist.has(key)) byArtist.set(key, { displayName: primary, uris: [] });
+    byArtist.get(key).uris.push(t.uri);
+  }
+  return byArtist;
+}
+
+// Build: normalized playlist name -> playlist object (only those you own)
+async function mapMyPlaylistsByName() {
+  const mine = await getMyOwnedPlaylists();
+  const map = new Map();
+  for (const p of mine) {
+    const key = normalizeArtistName(p.name);
+    map.set(key, p);
+  }
+  return map;
+}
+
+// Sync: for each of *your* playlists, if its name matches an artist
+// that has >= minCount tracks in All My Songs, ensure all are present.
+async function syncArtistPlaylists(minCount = 5) {
+  const out = document.getElementById("artistlog");
+  out.textContent = "Loading All My Songs and your playlists…";
+
+  // Ensure you have the right scopes
+  const needed = ["playlist-read-private","playlist-modify-private","playlist-modify-public"];
+  const tok = JSON.parse(localStorage.getItem("spotify_token") || "null");
+  const granted = new Set((tok?.scope || "").split(" ").filter(Boolean));
+  if (!needed.every(s => granted.has(s))) {
+    out.textContent = "Missing playlist modify scopes. Logging you in again…";
+    localStorage.removeItem("spotify_token");
+    localStorage.removeItem("pkce_verifier");
+    await startAuth(); // navigates away
+    return;
+  }
+
+  const [artistIndex, playlistMap] = await Promise.all([
+    buildArtistIndexFromAggregate(),
+    mapMyPlaylistsByName()
+  ]);
+
+  const results = [];
+  for (const [nameKey, playlist] of playlistMap.entries()) {
+    if (playlist.name === AGG_NAME) continue; // skip the aggregate
+    const artistData = artistIndex.get(nameKey);
+    if (!artistData) {
+      results.push(`Skip: “${playlist.name}” — no matching artist found in All My Songs`);
+      continue;
+    }
+    if (artistData.uris.length < minCount) {
+      results.push(`Skip: “${playlist.name}” — only ${artistData.uris.length} tracks in All My Songs (< ${minCount})`);
+      continue;
+    }
+
+    // Find missing tracks in the artist playlist
+    const existingUris = new Set(await getPlaylistTrackUris(playlist.id));
+    const toAdd = artistData.uris.filter(u => !existingUris.has(u));
+    if (toAdd.length) {
+      await addTracks(playlist.id, toAdd);
+      results.push(`Updated: “${playlist.name}” — added ${toAdd.length} track(s)`);
+    } else {
+      results.push(`OK: “${playlist.name}” already has all ${artistData.uris.length} track(s)`);
+    }
+  }
+
+  out.textContent = results.join("\n");
+}
+
+// Report artists with >= threshold tracks in All My Songs that *lack* an artist playlist
+async function findMissingArtistPlaylists(threshold = 7) {
+  const out = document.getElementById("artistlog");
+  out.textContent = "Scanning…";
+
+  const [artistIndex, playlistMap] = await Promise.all([
+    buildArtistIndexFromAggregate(),
+    mapMyPlaylistsByName()
+  ]);
+
+  const missing = [];
+  for (const [artistKey, data] of artistIndex.entries()) {
+    const count = data.uris.length;
+    if (count >= threshold && !playlistMap.has(artistKey)) {
+      missing.push({ name: data.displayName, count });
+    }
+  }
+  missing.sort((a,b) => b.count - a.count);
+
+  out.textContent = missing.length
+    ? "Artists with no playlist:\n" + missing.map(m => `• ${m.name} — ${m.count} tracks`).join("\n")
+    : `All set: every artist with ≥${threshold} tracks has a playlist.`;
+}
+
 
     /* ---------- 9) BOOT ---------- */
     (async function init() {
