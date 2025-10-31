@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>My Spotify Logger (PKCE)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 2rem auto; }
+    code, pre { background:#f6f6f6; padding:.25rem .5rem; border-radius:6px; }
+    .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <h1>My Spotify Logger</h1>
+  <div class="row">
+    <button id="login">Log in with Spotify</button>
+    <button id="logout">Log out</button>
+    <span id="status"></span>
+  </div>
+  <pre id="log"></pre>
+  <script>
+    // ---------- Config ----------
+    const CLIENT_ID = "YOUR_SPOTIFY_CLIENT_ID";
+    const REDIRECT_URI = location.origin + location.pathname; // same page
+    const SCOPES = [
+      "user-read-recently-played",
+      "user-read-currently-playing",
+      "user-read-playback-state"
+    ];
+
+    // ---------- Utilities ----------
+    const s = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+    const g = (k, d=null) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+    const logEl = document.getElementById("log");
+    const statusEl = document.getElementById("status");
+    const log = (...a) => { console.log(...a); logEl.textContent += a.join(" ") + "\n"; };
+
+    // ---------- PKCE helpers ----------
+    async function sha256(buf) { return crypto.subtle.digest("SHA-256", buf); }
+    function base64url(bytes) {
+      return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/,"");
+    }
+    async function pkceStart() {
+      const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+      const challenge = base64url(await sha256(new TextEncoder().encode(verifier)));
+      s("pkce_verifier", verifier);
+      const authUrl = new URL("https://accounts.spotify.com/authorize");
+      authUrl.searchParams.set("client_id", CLIENT_ID);
+      authUrl.searchParams.set("response_type", "code");
+      authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      authUrl.searchParams.set("code_challenge_method", "S256");
+      authUrl.searchParams.set("code_challenge", challenge);
+      authUrl.searchParams.set("scope", SCOPES.join(" "));
+      authUrl.searchParams.set("show_dialog", "true");
+      location.href = authUrl.toString();
+    }
+    async function exchangeCodeForToken(code) {
+      const body = new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: REDIRECT_URI,
+        client_id: CLIENT_ID,
+        code_verifier: g("pkce_verifier")
+      });
+      const r = await fetch("https://accounts.spotify.com/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body
+      });
+      if (!r.ok) throw new Error("Token exchange failed");
+      const tok = await r.json();
+      s("spotify_token", { ...tok, obtained_at: Date.now() });
+      return tok;
+    }
+    async function refreshTokenIfNeeded() {
+      let tok = g("spotify_token");
+      if (!tok) return null;
+      const expiresAt = tok.obtained_at + (tok.expires_in - 60) * 1000;
+      if (Date.now() < expiresAt) return tok;
+      if (!tok.refresh_token) return null; // implicit fallback would force reauth
+      const body = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tok.refresh_token,
+        client_id: CLIENT_ID
+      });
+      const r = await fetch("https://accounts.spotify.com/api/token", {
+        method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" }, body
+      });
+      if (!r.ok) return null;
+      const nt = await r.json();
+      tok = { ...tok, ...nt, obtained_at: Date.now() };
+      s("spotify_token", tok);
+      return tok;
+    }
+    async function requireToken() {
+      // handle ?code=... on first load
+      const params = new URLSearchParams(location.search);
+      if (params.has("code")) {
+        const code = params.get("code");
+        history.replaceState({}, "", REDIRECT_URI);
+        return exchangeCodeForToken(code);
+      }
+      return (await refreshTokenIfNeeded()) || g("spotify_token");
+    }
+    const authHeader = tok => ({ "Authorization": `Bearer ${tok.access_token}` });
+
+    // ---------- Persistence of plays ----------
+    // Structure: plays[trackId] = { count, lastPlayedAt, name, artist }
+    function getPlays() { return g("plays", {}); }
+    function setPlays(obj) { s("plays", obj); }
+    function incrementPlay(item) {
+      const plays = getPlays();
+      const id = item.track.id;
+      const prev = plays[id] || { count: 0, lastPlayedAt: 0, name: item.track.name,
+                                  artist: item.track.artists.map(a=>a.name).join(", ") };
+      prev.count += 1;
+      prev.lastPlayedAt = Date.parse(item.played_at || new Date().toISOString());
+      plays[id] = prev;
+      setPlays(plays);
+    }
+
+    // ---------- Deduping logic ----------
+    // Count a play when: progress >= 30s OR progress >= 50% of duration, and track changed since last counted.
+    let lastCounted = null;
+    function shouldCount(current) {
+      if (!current || !current.item) return false;
+      const id = current.item.id;
+      const dur = current.item.duration_ms || 0;
+      const prog = current.progress_ms || 0;
+      const passed = (prog >= 30000) || (dur && prog / dur >= 0.5);
+      const changed = lastCounted !== id;
+      return passed && changed && !current.currently_playing_type?.includes("ad");
+    }
+
+    // ---------- API calls ----------
+    async function api(path, tok, params={}) {
+      const url = new URL("https://api.spotify.com/v1" + path);
+      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+      const r = await fetch(url, { headers: authHeader(tok) });
+      if (r.status === 204) return null;
+      if (r.status === 429) {
+        const retry = Number(r.headers.get("Retry-After") || "5");
+        log("Rate limited. Backing off", retry, "s");
+        await new Promise(res => setTimeout(res, retry * 1000));
+        return api(path, tok, params);
+      }
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    }
+
+    async function backfill(tok) {
+      // Pull up to 50 recent plays and add any we haven't seen
+      const since = g("last_backfill_ts", 0);
+      const params = since ? { after: since, limit: 50 } : { limit: 50 };
+      const data = await api("/me/player/recently-played", tok, params);
+      if (!data || !data.items) return;
+      data.items.forEach(incrementPlay);
+      const newest = data.items[0]?.played_at ? Date.parse(data.items[0].played_at) : Date.now();
+      s("last_backfill_ts", newest);
+      log(`Backfilled ${data.items.length} plays (API only exposes last ~50).`);
+    }
+
+    async function pollCurrent(tok) {
+      try {
+        const cur = await api("/me/player/currently-playing", tok);
+        if (cur && shouldCount(cur)) {
+          lastCounted = cur.item.id;
+          // Fabricate a recently-played-like item for storage:
+          incrementPlay({
+            track: cur.item,
+            played_at: new Date().toISOString()
+          });
+          log(`Counted: ${cur.item.name} — ${cur.item.artists.map(a=>a.name).join(", ")}`);
+        }
+      } catch (e) {
+        log("poll error:", e.message);
+      }
+    }
+
+    // ---------- UI wiring ----------
+    document.getElementById("login").onclick = pkceStart;
+    document.getElementById("logout").onclick = () => {
+      localStorage.removeItem("spotify_token");
+      statusEl.textContent = "Logged out.";
+    };
+
+    (async function init() {
+      try {
+        const tok = await requireToken();
+        if (!tok) { statusEl.textContent = "Not logged in."; return; }
+        statusEl.textContent = "Authenticated.";
+        await backfill(tok);
+        // Start gentle polling
+        setInterval(() => refreshTokenIfNeeded().then(t => t && pollCurrent(t)), 25000); // 25s
+        // Show current tallies every 5s
+        setInterval(() => {
+          const plays = getPlays();
+          const lines = Object.entries(plays)
+            .sort((a,b)=>b[1].count - a[1].count)
+            .slice(0, 20)
+            .map(([id,p]) => `${p.count} × ${p.name} — ${p.artist}`);
+          logEl.textContent = lines.join("\n");
+        }, 5000);
+      } catch (e) {
+        statusEl.textContent = "Auth error. See console.";
+        console.error(e);
+      }
+    })();
+  </script>
+</body>
+</html>
