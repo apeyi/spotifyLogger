@@ -363,7 +363,7 @@
     }
     
     // Smart update (diff add/remove)
-    async function updateAggregateNow({ removeExtras = false } = {}) {
+    async function updateAggregateNow({ removeExtras = true } = {}) {
       const statusEl = document.getElementById("status") || { textContent: "" };
       const agg = await ensureAggregatePlaylist();
     
