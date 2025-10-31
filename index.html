@@ -15,6 +15,8 @@
   <div class="row">
     <button id="login">Log in with Spotify</button>
     <button id="logout">Log out</button>
+    <button id="createAggregate">Create “All My Songs (Auto)”</button>
+    <button id="updateAggregate">Update “All My Songs (Auto)”</button>
     <span id="status"></span>
   </div>
   <pre id="log"></pre>
@@ -25,7 +27,13 @@
     const SCOPES = [
       "user-read-recently-played",
       "user-read-currently-playing",
-      "user-read-playback-state"
+      "user-read-playback-state",
+      "user-read-recently-played",
+      "user-read-currently-playing",
+      "user-read-playback-state",
+      "playlist-read-private",
+      "playlist-modify-private",
+      "playlist-modify-public"
     ];
 
     // ---------- Utilities ----------
@@ -177,6 +185,216 @@
         log("poll error:", e.message);
       }
     }
+
+
+    /* ===== Playlist Aggregator (browser-only) ===== */
+    
+    // If you already have these, you can remove my copies:
+    async function requireToken() {
+      const tok = JSON.parse(localStorage.getItem("spotify_token") || "null");
+      if (!tok || !tok.access_token) throw new Error("Not authenticated");
+      return tok;
+    }
+    const authHeader = tok => ({ "Authorization": `Bearer ${tok.access_token}` });
+    
+    async function authed(path, { method="GET", params={}, body=null } = {}) {
+      const tok = await requireToken();
+      const url = new URL("https://api.spotify.com/v1" + path);
+      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+      const r = await fetch(url, {
+        method,
+        headers: { ...authHeader(tok), "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : null
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`${method} ${path} failed: ${r.status} ${text}`);
+      }
+      return r.status === 204 ? null : r.json();
+    }
+    
+    // Utility: chunk an array
+    const chunk = (arr, n=100) => {
+      const out = [];
+      for (let i=0;i<arr.length;i+=n) out.push(arr.slice(i, i+n));
+      return out;
+    };
+    
+    // Get current user (to filter playlists you own)
+    async function getMe() {
+      return authed("/me");
+    }
+    
+    // List *your* playlists (owner is you), all pages
+    async function getMyOwnedPlaylists() {
+      const me = await getMe();
+      const mine = [];
+      let next = { limit: 50, offset: 0 };
+      while (true) {
+        const page = await authed("/me/playlists", { params: next });
+        for (const p of page.items) {
+          if (p.owner?.id === me.id) mine.push(p);
+        }
+        if (!page.next) break;
+        next.offset += next.limit;
+      }
+      return mine;
+    }
+    
+    // Get all track URIs from a playlist (filters out local/episodes)
+    async function getPlaylistTrackUris(playlistId) {
+      const uris = [];
+      let next = { limit: 100, offset: 0 };
+      while (true) {
+        const page = await authed(`/playlists/${playlistId}/tracks`, { params: next });
+        for (const it of page.items) {
+          const tr = it.track;
+          if (!tr || it.is_local) continue;
+          if (tr.type !== "track") continue;      // skip podcasts/episodes
+          if (!tr.id || !tr.uri) continue;
+          uris.push(tr.uri);
+        }
+        if (!page.next) break;
+        next.offset += next.limit;
+      }
+      return uris;
+    }
+    
+    // Ensure (or find) the aggregate playlist
+    const AGG_NAME = "All My Songs (Auto)";
+    const AGG_DESC = "Automatically aggregated from all playlists I own (no duplicates).";
+    const AGG_KEY  = "aggregate_playlist_id";
+    
+    async function ensureAggregatePlaylist() {
+      // reuse cached id if still valid
+      const cached = localStorage.getItem(AGG_KEY);
+      if (cached) {
+        try {
+          const p = await authed(`/playlists/${cached}`);
+          if (p && p.name === AGG_NAME) return p; // still exists
+        } catch { /* fall through to re-create */ }
+      }
+    
+      const me = await getMe();
+    
+      // Try to find an existing one by name (in case cache is stale)
+      let found = null;
+      let next = { limit: 50, offset: 0 };
+      while (true) {
+        const page = await authed("/me/playlists", { params: next });
+        for (const p of page.items) {
+          if (p.name === AGG_NAME && p.owner?.id === me.id) { found = p; break; }
+        }
+        if (found || !page.next) break;
+        next.offset += next.limit;
+      }
+      if (found) {
+        localStorage.setItem(AGG_KEY, found.id);
+        return found;
+      }
+    
+      // Create a new private playlist
+      const created = await authed(`/users/${me.id}/playlists`, {
+        method: "POST",
+        body: { name: AGG_NAME, description: AGG_DESC, public: false }
+      });
+      localStorage.setItem(AGG_KEY, created.id);
+      return created;
+    }
+    
+    // Build the desired set of track URIs from all your playlists (deduped)
+    async function buildDesiredUris() {
+      const lists = await getMyOwnedPlaylists();
+      const seenTrackIds = new Set();
+      const desired = [];
+    
+      for (const p of lists) {
+        const uris = await getPlaylistTrackUris(p.id);
+        for (const uri of uris) {
+          // URI form is "spotify:track:<id>"
+          const id = uri.split(":").pop();
+          if (!seenTrackIds.has(id)) {
+            seenTrackIds.add(id);
+            desired.push(uri);
+          }
+        }
+      }
+      return desired;
+    }
+    
+    // Read current URIs in the aggregate playlist
+    async function getAggregateUris(playlistId) {
+      return getPlaylistTrackUris(playlistId);
+    }
+    
+    // Add up to 100 at a time
+    async function addTracks(playlistId, uris) {
+      for (const group of chunk(uris, 100)) {
+        await authed(`/playlists/${playlistId}/tracks`, {
+          method: "POST",
+          body: { uris: group }
+        });
+      }
+    }
+    
+    // Remove by URI (positions not needed); 100 per call
+    async function removeTracks(playlistId, uris) {
+      for (const group of chunk(uris, 100)) {
+        await authed(`/playlists/${playlistId}/tracks`, {
+          method: "DELETE",
+          body: { tracks: group.map(u => ({ uri: u })) }
+        });
+      }
+    }
+    
+    // One-shot create + fill
+    async function createAggregateNow() {
+      const statusEl = document.getElementById("status") || { textContent: "" };
+      statusEl.textContent = "Building list of tracks…";
+      const agg = await ensureAggregatePlaylist();
+      const desired = await buildDesiredUris();
+    
+      // Fill from scratch: add everything that isn't already in it
+      const existing = new Set(await getAggregateUris(agg.id));
+      const toAdd = desired.filter(u => !existing.has(u));
+      statusEl.textContent = `Adding ${toAdd.length} tracks to “${AGG_NAME}”…`;
+      await addTracks(agg.id, toAdd);
+      statusEl.textContent = `Done. Playlist has ~${desired.length} unique tracks.`;
+    }
+    
+    // Smart update (diff add/remove)
+    async function updateAggregateNow({ removeExtras = false } = {}) {
+      const statusEl = document.getElementById("status") || { textContent: "" };
+      const agg = await ensureAggregatePlaylist();
+    
+      statusEl.textContent = "Collecting playlists and tracks…";
+      const [desired, current] = await Promise.all([
+        buildDesiredUris(),
+        getAggregateUris(agg.id)
+      ]);
+    
+      const desiredSet = new Set(desired);
+      const currentSet = new Set(current);
+    
+      const toAdd = desired.filter(u => !currentSet.has(u));
+      const toRemove = removeExtras ? current.filter(u => !desiredSet.has(u)) : [];
+    
+      statusEl.textContent = `Syncing: +${toAdd.length} ${removeExtras ? ` / -${toRemove.length}` : ""}…`;
+      if (toAdd.length) await addTracks(agg.id, toAdd);
+      if (toRemove.length) await removeTracks(agg.id, toRemove);
+    
+      statusEl.textContent = "Update complete.";
+    }
+    
+    // Wire up buttons
+    document.getElementById("createAggregate").onclick = async () => {
+      try { await createAggregateNow(); } catch (e) { alert(e.message); }
+    };
+    document.getElementById("updateAggregate").onclick = async () => {
+      try { await updateAggregateNow({ removeExtras: false }); } catch (e) { alert(e.message); }
+    };
+
+    
 
     // ---------- UI wiring ----------
     document.getElementById("login").onclick = pkceStart;
