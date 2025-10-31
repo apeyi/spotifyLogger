@@ -1,33 +1,73 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>My Spotify Logger (PKCE)</title>
+  <title>Spotify Logger & Playlist Tools</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 2rem auto; }
-    code, pre { background:#f6f6f6; padding:.25rem .5rem; border-radius:6px; }
-    .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+    :root { --fg:#0b1220; --muted:#5a677d; --bg:#ffffff; --card:#f6f8fb; }
+    html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font:16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; }
+    .wrap { max-width: 920px; margin: 40px auto; padding: 0 16px; }
+    h1 { margin: 0 0 6px; font-size: 28px; }
+    p.lead { margin: 0 0 18px; color: var(--muted); }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin: 16px 0 12px; }
+    button { padding:10px 14px; border-radius:12px; border:1px solid #dfe3ea; background:#fff; cursor:pointer; box-shadow: 0 1px 0 rgba(10,10,10,.02); }
+    button:hover { background:#fafcff; }
+    .status { margin-left:auto; color:var(--muted); display:flex; align-items:center; gap:8px; }
+    .panel { background:var(--card); border:1px solid #e7ebf3; border-radius:16px; padding:16px; margin:18px 0; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    @media (max-width: 820px){ .grid { grid-template-columns: 1fr; } }
+    pre { white-space:pre-wrap; word-wrap:break-word; background:#fff; border:1px solid #eef1f6; border-radius:12px; padding:12px; max-height: 420px; overflow:auto; }
+    .small { font-size: 13px; color: var(--muted); }
+    .ok { color: #147d3f; }
+    .warn { color: #a66b00; }
+    .err { color: #a31212; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#eef2ff; border:1px solid #dee6ff; font-size:12px; }
+    a { color:#0b57d0; text-decoration:none; }
+    a:hover { text-decoration:underline; }
   </style>
 </head>
 <body>
-  <h1>My Spotify Logger</h1>
-  <div class="row">
-    <button id="login">Log in with Spotify</button>
-    <button id="logout">Log out</button>
-    <button id="createAggregate">Create “All My Songs (Auto)”</button>
-    <button id="updateAggregate">Update “All My Songs (Auto)”</button>
-    <span id="status"></span>
+  <div class="wrap">
+    <h1>Spotify Logger & Playlist Tools</h1>
+    <p class="lead">Log your plays in the browser, export CSV, and build an “All My Songs (Auto)” playlist from <em>all playlists you own</em>.</p>
+
+    <div class="toolbar">
+      <button id="login">Log in with Spotify</button>
+      <button id="logout">Log out</button>
+      <button id="downloadCsv">Download CSV</button>
+      <span class="status">Status: <span id="status" class="badge">Not authenticated</span></span>
+    </div>
+
+    <div class="panel grid">
+      <div>
+        <h3>Live Logger</h3>
+        <p class="small">Keeps a local tally in your browser; backfills up to the last ~50 plays from Spotify on load. You can export anytime.</p>
+        <pre id="log">(no data yet)</pre>
+      </div>
+      <div>
+        <h3>Aggregate Playlist</h3>
+        <p class="small">Creates/updates a private playlist named <b>“All My Songs (Auto)”</b> that contains every unique track from all playlists you <i>own</i>.</p>
+        <div class="toolbar" style="padding-left:0">
+          <button id="createAggregate">Create “All My Songs (Auto)”</button>
+          <button id="updateAggregate">Update (add missing)</button>
+          <button id="syncStrict">Sync (add & remove)</button>
+        </div>
+        <pre id="agglog">(nothing yet)</pre>
+      </div>
+    </div>
+
+    <p class="small">Tip: This is a client-side app. All data persists in your browser storage only (no server). Clear it by removing site data for this origin.</p>
   </div>
-  <pre id="log"></pre>
+
   <script>
-    // ---------- Config ----------
-    const CLIENT_ID    = "c38d37dff8004817b3261dd5da3c9ab4";  // ← copy from https://developer.spotify.com/dashboard/
-    const REDIRECT_URI = "https://apeyi.github.io/spotifyLogger/"; // note the trailing slash
+    /* ---------- 1) CONFIG ---------- */
+    // Your client ID (from Spotify Developer Dashboard)
+    const CLIENT_ID    = "c38d37dff8004817b3261dd5da3c9ab4";
+    // Exact redirect you registered (keep the trailing slash!)
+    const REDIRECT_URI = "https://apeyi.github.io/spotifyLogger/";
+    // Scopes needed for logging + playlist tools
     const SCOPES = [
-      "user-read-recently-played",
-      "user-read-currently-playing",
-      "user-read-playback-state",
       "user-read-recently-played",
       "user-read-currently-playing",
       "user-read-playback-state",
@@ -36,48 +76,63 @@
       "playlist-modify-public"
     ];
 
-    // ---------- Utilities ----------
+    /* ---------- 2) SMALL UTILS ---------- */
     const s = (k, v) => localStorage.setItem(k, JSON.stringify(v));
     const g = (k, d=null) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
-    const logEl = document.getElementById("log");
+    const del = (k) => localStorage.removeItem(k);
     const statusEl = document.getElementById("status");
-    const log = (...a) => { console.log(...a); logEl.textContent += a.join(" ") + "\n"; };
+    const logEl = document.getElementById("log");
+    const aggEl = document.getElementById("agglog");
+    const setStatus = (txt, cls="") => { statusEl.textContent = txt; statusEl.className = "badge " + cls; };
+    const append = (el, ...a) => { el.textContent += (el.textContent.trim() ? "\n" : "") + a.join(" "); };
 
-    // ---------- PKCE helpers ----------
-    async function sha256(buf) { return crypto.subtle.digest("SHA-256", buf); }
+    /* ---------- 3) PKCE HELPERS (no client secret) ---------- */
+    async function sha256(bytes) { return crypto.subtle.digest("SHA-256", bytes); }
     function base64url(bytes) {
       return btoa(String.fromCharCode(...new Uint8Array(bytes)))
         .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/,"");
     }
-    async function pkceStart() {
-      const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    function randVerifier() {
+      return base64url(crypto.getRandomValues(new Uint8Array(32)));
+    }
+    async function startAuth() {
+      const verifier = randVerifier();
       const challenge = base64url(await sha256(new TextEncoder().encode(verifier)));
       s("pkce_verifier", verifier);
-      const authUrl = new URL("https://accounts.spotify.com/authorize");
-      authUrl.searchParams.set("client_id", CLIENT_ID);
-      authUrl.searchParams.set("response_type", "code");
-      authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-      authUrl.searchParams.set("code_challenge_method", "S256");
-      authUrl.searchParams.set("code_challenge", challenge);
-      authUrl.searchParams.set("scope", SCOPES.join(" "));
-      authUrl.searchParams.set("show_dialog", "true");
-      location.href = authUrl.toString();
+
+      const url = new URL("https://accounts.spotify.com/authorize");
+      url.searchParams.set("client_id", CLIENT_ID);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("redirect_uri", REDIRECT_URI);
+      url.searchParams.set("code_challenge_method", "S256");
+      url.searchParams.set("code_challenge", challenge);
+      url.searchParams.set("scope", SCOPES.join(" "));
+      url.searchParams.set("show_dialog", "true");
+
+      location.href = url.toString();
+    }
+    async function fetchToken(params) {
+      const r = await fetch("https://accounts.spotify.com/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(params)
+      });
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error("Token error: " + text);
+      }
+      return r.json();
     }
     async function exchangeCodeForToken(code) {
-      const body = new URLSearchParams({
+      const verifier = g("pkce_verifier");
+      if (!verifier) throw new Error("Missing PKCE verifier; try logging in again.");
+      const tok = await fetchToken({
         grant_type: "authorization_code",
         code,
         redirect_uri: REDIRECT_URI,
         client_id: CLIENT_ID,
-        code_verifier: g("pkce_verifier")
+        code_verifier: verifier
       });
-      const r = await fetch("https://accounts.spotify.com/api/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body
-      });
-      if (!r.ok) throw new Error("Token exchange failed");
-      const tok = await r.json();
       s("spotify_token", { ...tok, obtained_at: Date.now() });
       return tok;
     }
@@ -86,50 +141,79 @@
       if (!tok) return null;
       const expiresAt = tok.obtained_at + (tok.expires_in - 60) * 1000;
       if (Date.now() < expiresAt) return tok;
-      if (!tok.refresh_token) return null; // implicit fallback would force reauth
-      const body = new URLSearchParams({
+      if (!tok.refresh_token) { setStatus("Session expired. Please log in.", "warn"); return null; }
+      const nt = await fetchToken({
         grant_type: "refresh_token",
         refresh_token: tok.refresh_token,
         client_id: CLIENT_ID
       });
-      const r = await fetch("https://accounts.spotify.com/api/token", {
-        method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" }, body
-      });
-      if (!r.ok) return null;
-      const nt = await r.json();
       tok = { ...tok, ...nt, obtained_at: Date.now() };
       s("spotify_token", tok);
       return tok;
     }
-    async function requireToken() {
-      // handle ?code=... on first load
+    async function handleRedirect() {
       const params = new URLSearchParams(location.search);
-      if (params.has("code")) {
-        const code = params.get("code");
-        history.replaceState({}, "", REDIRECT_URI);
-        return exchangeCodeForToken(code);
-      }
-      return (await refreshTokenIfNeeded()) || g("spotify_token");
+      if (!params.has("code")) return null;
+      const code = params.get("code");
+      history.replaceState({}, "", REDIRECT_URI); // clean URL
+      return exchangeCodeForToken(code);
     }
-    const authHeader = tok => ({ "Authorization": `Bearer ${tok.access_token}` });
+    async function requireTokenInteractive() {
+      const stored = g("spotify_token");
+      if (stored?.access_token) return stored;
+      // try code in URL first
+      const exchanged = await handleRedirect();
+      if (exchanged?.access_token) return g("spotify_token");
+      // otherwise prompt login
+      await startAuth();
+      return null; // navigation will occur
+    }
 
-    // ---------- Persistence of plays ----------
-    // Structure: plays[trackId] = { count, lastPlayedAt, name, artist }
+    /* ---------- 4) API HELPER WITH RATE-LIMIT BACKOFF ---------- */
+    const authHeader = tok => ({ "Authorization": `Bearer ${tok.access_token}` });
+    async function api(path, { method="GET", params={}, body=null } = {}) {
+      const tok = await refreshTokenIfNeeded();
+      if (!tok) throw new Error("Not authenticated.");
+      const url = new URL("https://api.spotify.com/v1" + path);
+      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+      const r = await fetch(url, {
+        method,
+        headers: { ...authHeader(tok), "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : null
+      });
+      if (r.status === 204) return null;
+      if (r.status === 429) {
+        const retry = Number(r.headers.get("Retry-After") || "5");
+        setStatus(`Rate limited; retrying in ${retry}s…`, "warn");
+        await new Promise(res => setTimeout(res, retry * 1000));
+        return api(path, { method, params, body });
+      }
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`${method} ${path}: ${r.status} ${text}`);
+      }
+      return r.json();
+    }
+
+    /* ---------- 5) LOGGER (stores in localStorage) ---------- */
+    // plays[trackId] = { count, lastPlayedAt, name, artist }
     function getPlays() { return g("plays", {}); }
     function setPlays(obj) { s("plays", obj); }
     function incrementPlay(item) {
       const plays = getPlays();
       const id = item.track.id;
-      const prev = plays[id] || { count: 0, lastPlayedAt: 0, name: item.track.name,
-                                  artist: item.track.artists.map(a=>a.name).join(", ") };
+      if (!id) return;
+      const prev = plays[id] || {
+        count: 0,
+        lastPlayedAt: 0,
+        name: item.track.name,
+        artist: item.track.artists?.map(a=>a.name).join(", ")
+      };
       prev.count += 1;
       prev.lastPlayedAt = Date.parse(item.played_at || new Date().toISOString());
       plays[id] = prev;
       setPlays(plays);
     }
-
-    // ---------- Deduping logic ----------
-    // Count a play when: progress >= 30s OR progress >= 50% of duration, and track changed since last counted.
     let lastCounted = null;
     function shouldCount(current) {
       if (!current || !current.item) return false;
@@ -140,117 +224,93 @@
       const changed = lastCounted !== id;
       return passed && changed && !current.currently_playing_type?.includes("ad");
     }
-
-    // ---------- API calls ----------
-    async function api(path, tok, params={}) {
-      const url = new URL("https://api.spotify.com/v1" + path);
-      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
-      const r = await fetch(url, { headers: authHeader(tok) });
-      if (r.status === 204) return null;
-      if (r.status === 429) {
-        const retry = Number(r.headers.get("Retry-After") || "5");
-        log("Rate limited. Backing off", retry, "s");
-        await new Promise(res => setTimeout(res, retry * 1000));
-        return api(path, tok, params);
-      }
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      return r.json();
-    }
-
-    async function backfill(tok) {
-      // Pull up to 50 recent plays and add any we haven't seen
-      const since = g("last_backfill_ts", 0);
-      const params = since ? { after: since, limit: 50 } : { limit: 50 };
-      const data = await api("/me/player/recently-played", tok, params);
-      if (!data || !data.items) return;
-      data.items.forEach(incrementPlay);
-      const newest = data.items[0]?.played_at ? Date.parse(data.items[0].played_at) : Date.now();
-      s("last_backfill_ts", newest);
-      log(`Backfilled ${data.items.length} plays (API only exposes last ~50).`);
-    }
-
-    async function pollCurrent(tok) {
+    async function backfill() {
       try {
-        const cur = await api("/me/player/currently-playing", tok);
+        const since = g("last_backfill_ts", 0);
+        const params = since ? { after: since, limit: 50 } : { limit: 50 };
+        const data = await api("/me/player/recently-played", { params });
+        const items = data?.items || [];
+        items.forEach(incrementPlay);
+        if (items.length) {
+          const newest = items[0].played_at ? Date.parse(items[0].played_at) : Date.now();
+          s("last_backfill_ts", newest);
+          append(logEl, `Backfilled ${items.length} plays.`);
+        } else {
+          append(logEl, "No recent plays to backfill.");
+        }
+      } catch (e) { append(logEl, "Backfill error: " + e.message); }
+    }
+    async function pollCurrent() {
+      try {
+        const cur = await api("/me/player/currently-playing");
         if (cur && shouldCount(cur)) {
           lastCounted = cur.item.id;
-          // Fabricate a recently-played-like item for storage:
-          incrementPlay({
-            track: cur.item,
-            played_at: new Date().toISOString()
-          });
-          log(`Counted: ${cur.item.name} — ${cur.item.artists.map(a=>a.name).join(", ")}`);
+          incrementPlay({ track: cur.item, played_at: new Date().toISOString() });
+          append(logEl, `Counted: ${cur.item.name} — ${cur.item.artists.map(a=>a.name).join(", ")}`);
         }
       } catch (e) {
-        log("poll error:", e.message);
+        append(logEl, "Poll error: " + e.message);
       }
     }
-
-
-    /* ===== Playlist Aggregator (browser-only) ===== */
-    
-    // If you already have these, you can remove my copies:
-    async function requireToken() {
-      const tok = JSON.parse(localStorage.getItem("spotify_token") || "null");
-      if (!tok || !tok.access_token) throw new Error("Not authenticated");
-      return tok;
+    function renderTop() {
+      const plays = getPlays();
+      const lines = Object.entries(plays)
+        .sort((a,b)=>b[1].count - a[1].count)
+        .slice(0, 30)
+        .map(([id,p]) => `${p.count} × ${p.name} — ${p.artist}`);
+      logEl.textContent = lines.length ? lines.join("\n") : "(no data yet)";
     }
-    const authHeader = tok => ({ "Authorization": `Bearer ${tok.access_token}` });
-    
-    async function authed(path, { method="GET", params={}, body=null } = {}) {
-      const tok = await requireToken();
-      const url = new URL("https://api.spotify.com/v1" + path);
-      Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
-      const r = await fetch(url, {
-        method,
-        headers: { ...authHeader(tok), "Content-Type": "application/json" },
-        body: body ? JSON.stringify(body) : null
-      });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`${method} ${path} failed: ${r.status} ${text}`);
+
+    /* ---------- 6) CSV EXPORT ---------- */
+    function csvEscape(s) {
+      if (s == null) return "";
+      s = String(s);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    }
+    function playsToCSV() {
+      const plays = getPlays();
+      const rows = [["track_id","name","artist","count","lastPlayedAtIso"]];
+      for (const [id, p] of Object.entries(plays)) {
+        rows.push([id, p.name ?? "", p.artist ?? "", p.count ?? 0,
+          p.lastPlayedAt ? new Date(p.lastPlayedAt).toISOString() : ""]);
       }
-      return r.status === 204 ? null : r.json();
+      return rows.map(r => r.map(csvEscape).join(",")).join("\n");
     }
-    
-    // Utility: chunk an array
-    const chunk = (arr, n=100) => {
-      const out = [];
-      for (let i=0;i<arr.length;i+=n) out.push(arr.slice(i, i+n));
-      return out;
-    };
-    
-    // Get current user (to filter playlists you own)
-    async function getMe() {
-      return authed("/me");
+    function downloadCSV(filename = "spotify_plays.csv") {
+      const blob = new Blob([playsToCSV()], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
     }
-    
-    // List *your* playlists (owner is you), all pages
+
+    /* ---------- 7) PLAYLIST AGGREGATOR ---------- */
+    const AGG_NAME = "All My Songs (Auto)";
+    const AGG_DESC = "Automatically aggregated from all playlists I own (no duplicates).";
+    const AGG_KEY  = "aggregate_playlist_id";
+    const chunk = (arr, n=100) => { const out=[]; for (let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; };
+
+    async function getMe() { return api("/me"); }
     async function getMyOwnedPlaylists() {
       const me = await getMe();
       const mine = [];
       let next = { limit: 50, offset: 0 };
       while (true) {
-        const page = await authed("/me/playlists", { params: next });
-        for (const p of page.items) {
-          if (p.owner?.id === me.id) mine.push(p);
-        }
+        const page = await api("/me/playlists", { params: next });
+        for (const p of page.items) if (p.owner?.id === me.id) mine.push(p);
         if (!page.next) break;
         next.offset += next.limit;
       }
       return mine;
     }
-    
-    // Get all track URIs from a playlist (filters out local/episodes)
     async function getPlaylistTrackUris(playlistId) {
       const uris = [];
       let next = { limit: 100, offset: 0 };
       while (true) {
-        const page = await authed(`/playlists/${playlistId}/tracks`, { params: next });
+        const page = await api(`/playlists/${playlistId}/tracks`, { params: next });
         for (const it of page.items) {
           const tr = it.track;
           if (!tr || it.is_local) continue;
-          if (tr.type !== "track") continue;      // skip podcasts/episodes
+          if (tr.type !== "track") continue;
           if (!tr.id || !tr.uri) continue;
           uris.push(tr.uri);
         }
@@ -259,170 +319,129 @@
       }
       return uris;
     }
-    
-    // Ensure (or find) the aggregate playlist
-    const AGG_NAME = "All My Songs (Auto)";
-    const AGG_DESC = "Automatically aggregated from all playlists I own (no duplicates).";
-    const AGG_KEY  = "aggregate_playlist_id";
-    
     async function ensureAggregatePlaylist() {
-      // reuse cached id if still valid
       const cached = localStorage.getItem(AGG_KEY);
       if (cached) {
         try {
-          const p = await authed(`/playlists/${cached}`);
-          if (p && p.name === AGG_NAME) return p; // still exists
-        } catch { /* fall through to re-create */ }
+          const p = await api(`/playlists/${cached}`);
+          if (p && p.name === AGG_NAME) return p;
+        } catch {}
       }
-    
       const me = await getMe();
-    
-      // Try to find an existing one by name (in case cache is stale)
       let found = null;
       let next = { limit: 50, offset: 0 };
       while (true) {
-        const page = await authed("/me/playlists", { params: next });
+        const page = await api("/me/playlists", { params: next });
         for (const p of page.items) {
           if (p.name === AGG_NAME && p.owner?.id === me.id) { found = p; break; }
         }
         if (found || !page.next) break;
         next.offset += next.limit;
       }
-      if (found) {
-        localStorage.setItem(AGG_KEY, found.id);
-        return found;
-      }
-    
-      // Create a new private playlist
-      const created = await authed(`/users/${me.id}/playlists`, {
+      if (found) { localStorage.setItem(AGG_KEY, found.id); return found; }
+      const created = await api(`/users/${me.id}/playlists`, {
         method: "POST",
         body: { name: AGG_NAME, description: AGG_DESC, public: false }
       });
       localStorage.setItem(AGG_KEY, created.id);
       return created;
     }
-    
-    // Build the desired set of track URIs from all your playlists (deduped)
     async function buildDesiredUris() {
       const lists = await getMyOwnedPlaylists();
-      const seenTrackIds = new Set();
-      const desired = [];
-    
+      const seen = new Set(), desired = [];
       for (const p of lists) {
         const uris = await getPlaylistTrackUris(p.id);
         for (const uri of uris) {
-          // URI form is "spotify:track:<id>"
           const id = uri.split(":").pop();
-          if (!seenTrackIds.has(id)) {
-            seenTrackIds.add(id);
-            desired.push(uri);
-          }
+          if (!seen.has(id)) { seen.add(id); desired.push(uri); }
         }
       }
       return desired;
     }
-    
-    // Read current URIs in the aggregate playlist
-    async function getAggregateUris(playlistId) {
-      return getPlaylistTrackUris(playlistId);
-    }
-    
-    // Add up to 100 at a time
+    async function getAggregateUris(playlistId) { return getPlaylistTrackUris(playlistId); }
     async function addTracks(playlistId, uris) {
       for (const group of chunk(uris, 100)) {
-        await authed(`/playlists/${playlistId}/tracks`, {
-          method: "POST",
-          body: { uris: group }
-        });
+        await api(`/playlists/${playlistId}/tracks`, { method: "POST", body: { uris: group } });
       }
     }
-    
-    // Remove by URI (positions not needed); 100 per call
     async function removeTracks(playlistId, uris) {
       for (const group of chunk(uris, 100)) {
-        await authed(`/playlists/${playlistId}/tracks`, {
+        await api(`/playlists/${playlistId}/tracks`, {
           method: "DELETE",
           body: { tracks: group.map(u => ({ uri: u })) }
         });
       }
     }
-    
-    // One-shot create + fill
     async function createAggregateNow() {
-      const statusEl = document.getElementById("status") || { textContent: "" };
-      statusEl.textContent = "Building list of tracks…";
+      aggEl.textContent = "Building list of tracks…";
       const agg = await ensureAggregatePlaylist();
       const desired = await buildDesiredUris();
-    
-      // Fill from scratch: add everything that isn't already in it
       const existing = new Set(await getAggregateUris(agg.id));
       const toAdd = desired.filter(u => !existing.has(u));
-      statusEl.textContent = `Adding ${toAdd.length} tracks to “${AGG_NAME}”…`;
-      await addTracks(agg.id, toAdd);
-      statusEl.textContent = `Done. Playlist has ~${desired.length} unique tracks.`;
+      aggEl.textContent = `Adding ${toAdd.length} tracks to “${AGG_NAME}”…`;
+      if (toAdd.length) await addTracks(agg.id, toAdd);
+      aggEl.textContent = `Done. Aggregate now ~${desired.length} unique tracks.`;
     }
-    
-    // Smart update (diff add/remove)
-    async function updateAggregateNow({ removeExtras = true } = {}) {
-      const statusEl = document.getElementById("status") || { textContent: "" };
+    async function updateAggregateNow({ removeExtras = false } = {}) {
+      aggEl.textContent = "Collecting playlists and tracks…";
       const agg = await ensureAggregatePlaylist();
-    
-      statusEl.textContent = "Collecting playlists and tracks…";
       const [desired, current] = await Promise.all([
         buildDesiredUris(),
         getAggregateUris(agg.id)
       ]);
-    
       const desiredSet = new Set(desired);
       const currentSet = new Set(current);
-    
       const toAdd = desired.filter(u => !currentSet.has(u));
       const toRemove = removeExtras ? current.filter(u => !desiredSet.has(u)) : [];
-    
-      statusEl.textContent = `Syncing: +${toAdd.length} ${removeExtras ? ` / -${toRemove.length}` : ""}…`;
+      aggEl.textContent = `Syncing: +${toAdd.length}${removeExtras ? ` / -${toRemove.length}` : ""}…`;
       if (toAdd.length) await addTracks(agg.id, toAdd);
       if (toRemove.length) await removeTracks(agg.id, toRemove);
-    
-      statusEl.textContent = "Update complete.";
+      aggEl.textContent = "Update complete.";
     }
-    
-    // Wire up buttons
+
+    /* ---------- 8) UI WIRING ---------- */
+    document.getElementById("login").onclick = async () => {
+      try { await requireTokenInteractive(); } catch (e) { setStatus("Auth error", "err"); alert(e.message); }
+    };
+    document.getElementById("logout").onclick = () => {
+      del("spotify_token"); del("pkce_verifier");
+      setStatus("Logged out", "warn");
+    };
+    document.getElementById("downloadCsv").onclick = () => downloadCSV();
+
     document.getElementById("createAggregate").onclick = async () => {
-      try { await createAggregateNow(); } catch (e) { alert(e.message); }
+      try { await requireTokenInteractive(); await createAggregateNow(); }
+      catch (e) { aggEl.textContent = "Error: " + e.message; }
     };
     document.getElementById("updateAggregate").onclick = async () => {
-      try { await updateAggregateNow({ removeExtras: false }); } catch (e) { alert(e.message); }
+      try { await requireTokenInteractive(); await updateAggregateNow({ removeExtras:false }); }
+      catch (e) { aggEl.textContent = "Error: " + e.message; }
+    };
+    document.getElementById("syncStrict").onclick = async () => {
+      try { await requireTokenInteractive(); await updateAggregateNow({ removeExtras:true }); }
+      catch (e) { aggEl.textContent = "Error: " + e.message; }
     };
 
-    
-
-    // ---------- UI wiring ----------
-    document.getElementById("login").onclick = pkceStart;
-    document.getElementById("logout").onclick = () => {
-      localStorage.removeItem("spotify_token");
-      statusEl.textContent = "Logged out.";
-    };
-
+    /* ---------- 9) BOOT ---------- */
     (async function init() {
       try {
-        const tok = await requireToken();
-        if (!tok) { statusEl.textContent = "Not logged in."; return; }
-        statusEl.textContent = "Authenticated.";
-        await backfill(tok);
-        // Start gentle polling
-        setInterval(() => refreshTokenIfNeeded().then(t => t && pollCurrent(t)), 25000); // 25s
-        // Show current tallies every 5s
-        setInterval(() => {
-          const plays = getPlays();
-          const lines = Object.entries(plays)
-            .sort((a,b)=>b[1].count - a[1].count)
-            .slice(0, 20)
-            .map(([id,p]) => `${p.count} × ${p.name} — ${p.artist}`);
-          logEl.textContent = lines.join("\n");
-        }, 5000);
+        // If we were just redirected back with ?code=..., this will exchange and store tokens.
+        await handleRedirect();
+        const tok = await refreshTokenIfNeeded();
+        if (!tok) { setStatus("Not authenticated"); return; }
+        setStatus("Authenticated", "ok");
+
+        // Backfill + start polling for plays
+        await backfill();
+        renderTop();
+        setInterval(async () => {
+          const t = await refreshTokenIfNeeded();
+          if (t) await pollCurrent();
+          renderTop();
+        }, 25000);
       } catch (e) {
-        statusEl.textContent = "Auth error. See console.";
-        console.error(e);
+        setStatus("Init error", "err");
+        append(logEl, "Init error: " + e.message);
       }
     })();
   </script>
