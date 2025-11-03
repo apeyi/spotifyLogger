@@ -1,5 +1,9 @@
+// js/config.js
 export const CLIENT_ID = "c38d37dff8004817b3261dd5da3c9ab4";
-export const REDIRECT_URI = "https://apeyi.github.io/spotifyLogger/"; // must match dashboard exactly
+
+// 👇 change this to the callback page (note: no trailing slash here)
+export const REDIRECT_URI = "https://apeyi.github.io/spotifyLogger/callback.html";
+
 export const SCOPES = [
   "user-read-recently-played",
   "user-read-currently-playing",
@@ -9,6 +13,5 @@ export const SCOPES = [
   "playlist-modify-public"
 ];
 
-// App-wide constants
 export const AGG_NAME = "All My Songs (Auto)";
 export const AGG_DESC = "Automatically aggregated from all playlists I own (no duplicates).";
