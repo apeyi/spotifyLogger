@@ -12,10 +12,10 @@
     <p class="lead">Log plays in your browser, export CSV, and maintain an “All My Songs (Auto)” playlist + artist playlists.</p>
 
     <div class="toolbar">
-      <button id="login">Log in with Spotify</button>
+      <!-- Login button removed (auto-auth happens on load) -->
       <button id="logout">Log out</button>
       <button id="downloadCsv">Download CSV</button>
-      <span class="status">Status: <span id="status" class="badge">Not authenticated</span></span>
+      <span class="status">Status: <span id="status" class="badge">Checking…</span></span>
     </div>
 
     <div class="panel grid">
@@ -49,7 +49,7 @@
     <p class="small">Tip: This is a client-side app. Data stays in your browser storage. Clear it by removing site data for this origin.</p>
   </div>
 
-  <!-- Use native ES modules; no bundler required -->
+  <!-- Native ES modules -->
   <script type="module" src="./js/main.js"></script>
 </body>
 </html>
