@@ -87,9 +87,6 @@ export function downloadCSV(filename = "spotify_plays.csv") {
   URL.revokeObjectURL(url);
 }
 
-
-import { api } from "./api.js";
-
 export async function renderSpotifyTopN(targetEl, n = 10, range = "medium_term") {
   const data = await api("/me/top/tracks", { params: { limit: n, time_range: range } });
   const tracks = data.items || [];
