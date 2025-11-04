@@ -45,6 +45,20 @@
       </div>
       <pre id="artistlog">(nothing yet)</pre>
     </div>
+    <div class="panel">
+      <h3>Your Spotify Top 10</h3>
+      <p class="small">Pulled directly from Spotify’s listening stats.</p>
+      <div class="toolbar" style="padding-left:0">
+        <select id="topRange">
+          <option value="short_term">Last 4 weeks</option>
+          <option value="medium_term" selected>Last 6 months</option>
+          <option value="long_term">All time</option>
+        </select>
+        <button id="fetchSpotifyTop10">Fetch Top 10</button>
+      </div>
+      <div id="spotifyTop10"></div>
+    </div>
+
 
     <p class="small">Tip: This is a client-side app. Data stays in your browser storage. Clear it by removing site data for this origin.</p>
   </div>
