@@ -11,7 +11,10 @@ function b64url(bytes) {
 }
 function randVerifier() { return b64url(crypto.getRandomValues(new Uint8Array(32))); }
 
-export function getToken() { return g("spotify_token"); }
+export function getToken() {
+  const t = JSON.parse(localStorage.getItem("spotify_token") || "null");
+  return (t && typeof t.access_token === "string" && t.access_token.length > 10) ? t : null;
+}
 
 export async function startAuth() {
   const verifier = randVerifier();
