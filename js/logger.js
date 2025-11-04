@@ -86,3 +86,34 @@ export function downloadCSV(filename = "spotify_plays.csv") {
   const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
 }
+
+
+import { api } from "./api.js";
+
+export async function renderSpotifyTopN(targetEl, n = 10, range = "medium_term") {
+  const data = await api("/me/top/tracks", { params: { limit: n, time_range: range } });
+  const tracks = data.items || [];
+
+  if (!tracks.length) {
+    targetEl.innerHTML = `<p class="small">(no data returned)</p>`;
+    return;
+  }
+
+  const rows = tracks.map((tr, i) => {
+    const image = tr.album?.images?.[2]?.url || tr.album?.images?.[1]?.url || "";
+    const artist = tr.artists.map(a=>a.name).join(", ");
+    return `
+      <div class="topitem">
+        <div>${i+1}.</div>
+        ${image ? `<img src="${image}" alt="">` : ""}
+        <div class="topmeta">
+          <a class="name" href="${tr.external_urls.spotify}" target="_blank" rel="noopener">${tr.name}</a>
+          <div class="artist">${artist}</div>
+        </div>
+        <div class="topcount">🎧</div>
+      </div>`;
+  }).join("");
+
+  targetEl.innerHTML = `<div class="toplist">${rows}</div>`;
+}
+
