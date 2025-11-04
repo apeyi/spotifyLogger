@@ -2,6 +2,8 @@ import { requireTokenInteractive, logout } from "./auth.js";
 import { backfill, pollCurrent, renderTop, downloadCSV } from "./logger.js";
 import { createAggregateNow, updateAggregateNow } from "./playlists.js";
 import { syncArtistPlaylists, findMissingArtistPlaylists } from "./artistPlaylists.js";
+import { renderSpotifyTopN } from "./logger.js";
+
 
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
@@ -34,6 +36,17 @@ document.getElementById("findMissingArtistPlaylists").onclick = async () => {
   try { await requireTokenInteractive(); await findMissingArtistPlaylists(artistLogEl, 7); }
   catch (e) { artistLogEl.textContent = "Error: " + e.message; }
 };
+
+document.getElementById("fetchSpotifyTop10").onclick = async () => {
+  try {
+    await requireTokenInteractive();
+    const range = document.getElementById("topRange").value;
+    await renderSpotifyTopN(document.getElementById("spotifyTop10"), 10, range);
+  } catch (e) {
+    document.getElementById("spotifyTop10").innerHTML = `<p class="small err">${e.message}</p>`;
+  }
+};
+
 
 // Boot: immediately require auth; if not logged in, this will redirect to Spotify.
 // After returning from Spotify, callback.html stores tokens and sends us back here.
